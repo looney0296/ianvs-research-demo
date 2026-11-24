@@ -1,38 +1,76 @@
+from dataclasses import replace
+from datetime import date
 import unittest
 
-from demo import Bar, simulate
+from demo import Action, Close, Cycle, Intent, Position, Quotes, confirm, decide, plan_open
+
+CLOSE = date(2026, 1, 9)
+OPEN = date(2026, 1, 12)
+FRAME = Close(CLOSE, CLOSE, CLOSE, 100, -0.10, 0, 0)
+QUOTES = Quotes(50, 49.5, 100, 100)
 
 
-class SimulationTests(unittest.TestCase):
-    def setUp(self):
-        self.bars = (Bar("2026-01-05", 100, 98), Bar("2026-01-06", 95, 99),
-                     Bar("2026-01-07", 102, 104))
+class SignalTests(unittest.TestCase):
+    def test_stale_reference_bar_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "stale"):
+            decide(replace(FRAME, reference_session=date(2026, 1, 8)),
+                   OPEN, Position(0, 100, 1000), Cycle())
 
-    def test_signal_trades_next_open_only(self):
-        result = simulate(self.bars, (1, None, None))
-        self.assertEqual(len(result.fills), 1)
-        self.assertEqual((result.fills[0].session, result.fills[0].opening),
-                         ("2026-01-06", 95))
-        self.assertEqual(result.closing_equity[0], 10_000)
+    def test_exit_has_priority_over_profit_and_dips(self):
+        frame = replace(FRAME, risk_close=250, previous_gap=0, trend_gap=-0.03)
+        decision = decide(frame, OPEN, Position(18, 100, 0), Cycle(100, 18))
+        self.assertEqual((decision.action, decision.size), (Action.TREND_RESET, 18))
 
-    def test_terminal_signal_has_no_fill(self):
-        self.assertEqual(simulate(self.bars, (None, None, 1)).fills, ())
+    def test_second_dip_needs_confirmation_and_stop_zone_blocks_add(self):
+        frame = replace(FRAME, reference_drawdown=-0.18)
+        pos = Position(20, 60, 0)
+        state = Cycle(100, 20)
+        self.assertEqual(decide(frame, OPEN, pos, state).action, Action.FIRST_DIP)
+        confirmed = confirm(state, Action.FIRST_DIP, 20, 100)
+        self.assertEqual(decide(frame, OPEN, pos, confirmed).action, Action.ADD_TRANCHE)
+        self.assertIsNone(decide(replace(frame, reference_drawdown=-0.40),
+                                 OPEN, pos, confirmed))
 
-    def test_staged_weights_use_post_cost_equity(self):
-        result = simulate(self.bars, (0.5, 0.25, None))
-        buy, sell = result.fills
-        self.assertAlmostEqual(buy.notional / (10_000 - buy.fee), 0.5)
-        risky = buy.notional / 95 * 102
-        cash = 10_000 - buy.notional - buy.fee
-        self.assertAlmostEqual((risky + sell.notional) / (risky + cash - sell.fee), 0.25)
-        self.assertLess(sell.notional, 0)
+    def test_profit_quantity_uses_confirmed_base_and_is_capped(self):
+        frame = replace(FRAME, risk_close=130)
+        self.assertEqual(decide(frame, OPEN, Position(11, 6, 0), Cycle(100, 20)).size, 8)
+        self.assertEqual(decide(frame, OPEN, Position(3, 6, 0), Cycle(100, 20)).size, 3)
 
-    def test_fee_charged_on_both_buy_and_sell(self):
-        result = simulate(self.bars, (1, 0, None))
-        for fill in result.fills:
-            self.assertAlmostEqual(fill.fee, abs(fill.notional) * 0.0006)
-        self.assertGreater(result.fills[1].fee, 0)
+    def test_harvest_confirmation_and_reset(self):
+        state = Cycle(100, 20, True, True)
+        updated = confirm(state, Action.FIRST_HARVEST, 12, 100)
+        self.assertTrue(updated.first_harvest)
+        self.assertEqual(updated.base_shares, 20)
+        self.assertEqual(confirm(updated, Action.TREND_RESET, 0, 0), Cycle())
 
-    def test_rejects_wrong_number_of_signals(self):
-        with self.assertRaises(ValueError):
-            simulate(self.bars, (None,))
+
+class PlanningTests(unittest.TestCase):
+    def test_cannot_plan_same_day_or_after_designated_session(self):
+        order = Intent(CLOSE, OPEN, Action.FIRST_DIP, 0.25)
+        for wrong_day in (CLOSE, date(2026, 1, 13)):
+            with self.assertRaises(ValueError):
+                plan_open(order, wrong_day, Position(0, 100, 1000), QUOTES, 10)
+
+    def test_execution_reserve_requires_extra_defensive_share(self):
+        pos = Position(0, 100, 1000)
+        order = Intent(CLOSE, OPEN, Action.FIRST_DIP, 0.40)
+        free = plan_open(order, OPEN, pos, QUOTES, 0)
+        reserved = plan_open(order, OPEN, pos, QUOTES, 20)
+        self.assertEqual((free.sell_defensive, reserved.sell_defensive, reserved.buy_risk),
+                         (34, 35, 88))
+
+    def test_add_tranche_is_not_a_target_weight(self):
+        pos = Position(30, 100, 1000)
+        target = plan_open(Intent(CLOSE, OPEN, Action.FIRST_DIP, 0.30), OPEN, pos, QUOTES, 10)
+        add = plan_open(Intent(CLOSE, OPEN, Action.ADD_TRANCHE, 0.30), OPEN, pos, QUOTES, 10)
+        self.assertGreater(add.buy_risk, target.buy_risk)
+
+    def test_funding_limits_whole_share_order(self):
+        order = Intent(CLOSE, OPEN, Action.TREND_ENTRY, 1)
+        plan = plan_open(order, OPEN, Position(0, 0, 99), QUOTES, 10)
+        self.assertEqual((plan.buy_risk, plan.sell_defensive), (1, 0))
+
+    def test_full_exit_sizes_defensive_leg(self):
+        order = Intent(CLOSE, OPEN, Action.TREND_RESET, 20)
+        plan = plan_open(order, OPEN, Position(20, 0, 10), Quotes(50, 50, 100, 100), 20)
+        self.assertEqual((plan.sell_risk, plan.buy_defensive), (20, 10))
