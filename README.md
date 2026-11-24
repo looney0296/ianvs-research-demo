@@ -1,6 +1,6 @@
 # IANVS3 Staged Allocation Demo
 
-A public adaptation of the IANVS3 strategy state machine and next-open execution planner. It shows how a closing signal becomes a whole-share plan across a risk ETF and a defensive ETF, and when the strategy is allowed to advance to its next stage.
+A runnable extract of the IANVS3 strategy engine. The close decision, whole-share order planner, and state update are taken from the original engine, with broker I/O replaced by supplied data and quotes. The public example uses fictional prices, neutral asset names, and illustrative policy settings.
 
 ## How IANVS evolved
 
@@ -18,19 +18,26 @@ A public adaptation of the IANVS3 strategy state machine and next-open execution
 | Next open | Use fresh bid-side and ask-side quote inputs. Sell enough defensive shares to fund the intended purchase plus a cost reserve, then cap the purchase at affordable whole shares. |
 | Confirmation | Planning alone does not consume a dip or profit-taking stage. Advance the cycle after confirmation, using observed post-trade shares and cost basis. A trend exit resets the cycle. |
 
+## Source included
+
+- `ianvs3_core.py`: selected IANVS3 engine functions, including indicator construction and close decisions, whole-share next-open planning, and post-execution state transitions.
+- `test_source.py`: four corresponding regression cases adapted from the original test suite. The original fixtures and assertions are retained apart from neutral asset names and injected quote and reserve inputs.
+- `demo.py` and `test_demo.py`: a fictional end-to-end example and supplemental tests. The harness supplies the expected session rather than importing an exchange calendar.
+
 ## Run
 
-Python 3.10+, standard library only. No credentials or network access.
+Use Python 3.10 or later with pandas installed. The demo itself runs offline and needs no credentials.
 
 ```sh
+python -m pip install pandas
 python demo.py
 python -m unittest -v
 ```
 
-The example evaluates Friday's close and creates a plan for Monday's open: sell **18 defensive shares** to fund **55 risk shares**. It prints the unchanged cycle after planning and then advances it after a simulated confirmation. Tests cover timing, stale data, action priority, tranche sizing, and state transitions.
+The sample creates an entry intent at Friday's close, then plans a sale of **37 defensive shares** and a purchase of **92 risk shares** for Monday's open. A separately supplied fictional post-trade snapshot advances the cycle. The example never submits orders.
 
 ## Validation and scope
 
-The order-planning implementation was checked against the original private IANVS3 planner on 2,400 synthetic combinations across target-weight entry, additive entry, and full exit; the order quantities matched in those cases. The private-source comparison isn't part of this public repository. Its public unit tests run independently.
+Nine tests run in the public repository. In additional offline comparisons against the original private source, **300** synthetic close fixtures matched actions and execution directives, covering all eight action types and no action. **2,400** synthetic order-planning fixtures matched whole-share buys and sells across target-weight entry, additive entry, and full exit. Those private-source comparisons match policy inputs; the illustrative public defaults do not represent the original strategy settings.
 
-The demo takes precomputed close indicators and an explicit next-session date. Thresholds and prices are illustrative, and the public policy omits the original indicator calculations and sizing overlays. It does not include a calendar or market data feed, broker integration, order submission, fill recovery, or historical performance estimates.
+This extract excludes the broker adapter, credential and account setup, live execution, order journal and recovery, and real data. It does not claim historical or live performance.
